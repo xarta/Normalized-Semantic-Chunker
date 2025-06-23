@@ -1,13 +1,11 @@
-import os
 import time
-import json
 import logging
+import numpy as np
 import re
-import psutil
 import tiktoken
 import torch
 import multiprocessing
-import numpy as np
+import os
 from logging.handlers import RotatingFileHandler
 from sentence_transformers import SentenceTransformer
 from typing import List, Optional, Dict, Union
@@ -17,58 +15,25 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-
-RESERVED_SYSTEM_MEMORY_GB = 4.0  # GB of RAM to keep free for the OS and other processes
-BASE_MEMORY_PER_WORKER_GB = 1.0  # Base GB of RAM allocated per worker
-MEMORY_PER_SENTENCE_GB = 0.0004  # Additional GB of RAM per sentence per worker
-DOC_SIZE_FACTOR_SCALER = (
-    3000  # Scaler used in document size factor for CPU-based worker calculation
-)
-VERY_LARGE_DOC_SENTENCE_THRESHOLD = (
-    20000  # Sentences to be considered a very large document
-)
-LARGE_DOC_SENTENCE_THRESHOLD = 10000  # Sentences to be considered a large document
-MIN_SENTENCES_FOR_PARALLEL = (
-    100  # Minimum sentences to use parallel processing instead of sequential
-)
-WORKERS_VERY_LARGE_DOC = 1  # Max workers for very large documents
-WORKERS_LARGE_DOC = 2  # Max workers for large documents
-STEP_SIZE_VERY_LARGE_DOC_THRESHOLD = (
-    15000  # Sentence count threshold for using smallest step size
-)
-STEP_SIZE_LARGE_DOC_THRESHOLD = (
-    5000  # Sentence count threshold for using medium step size
-)
-STEP_SIZE_DEFAULT = 10  # Default step size for smaller documents
-STEP_SIZE_LARGE_DOC = 5  # Step size for large documents
-STEP_SIZE_VERY_LARGE_DOC = 3  # Step size for very large documents
-
-ALLOWED_EXTENSIONS = {"txt", "md", "json"}
-EMBEDDER_MODEL = os.environ.get(
-    "EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
-)
-MAX_FILE_SIZE = int(
-    os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024)
-)  # 10MB di default
-MAX_WORKERS = int(
-    os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4))
-)
+# Configurazione modificabile tramite variabili d'ambiente
+ALLOWED_EXTENSIONS = {"txt", "md"}
+EMBEDDER_MODEL = os.environ.get("EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))  # 10MB di default
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4)))
 CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 ora in secondi
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(
-        f"Loading embedding model {EMBEDDER_MODEL} during application startup..."
-    )
+    logger.info(f"Loading embedding model {EMBEDDER_MODEL} during application startup...")
     try:
         _get_model(EMBEDDER_MODEL)
         logger.info("Embedding model loaded successfully.")
     except Exception as e:
         logger.error(f"Failed to load embedding model: {str(e)}")
-
+    
     yield
-
+    
     # Cleanup
     logger.info("Application shutting down, cleaning up resources...")
     try:
@@ -78,7 +43,7 @@ async def lifespan(app: FastAPI):
                 if model_name in _model_cache:
                     del _model_cache[model_name]
                     logger.info(f"Removed model {model_name} from cache")
-
+        
         # Cleanup GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -90,7 +55,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Normalized Semantic Chunker",
     description="API for processing and chunking text documents into smaller, semantically coherent segments",
-    version="0.7.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
@@ -98,7 +63,7 @@ app = FastAPI(
 logs_dir = Path("logs")
 logs_dir.mkdir(exist_ok=True)
 
-# Configure logging (this sets up root logger with a console handler)
+# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -127,23 +92,6 @@ file_handler.setFormatter(formatter)
 # Add the handler to the logger
 logger.addHandler(file_handler)
 
-
-# Function to log messages based on verbosity setting
-def log_message(message, is_step=False, is_summary=False, verbosity=True):
-    """
-    Log messages with verbosity control.
-
-    Args:
-        message: The message to log
-        is_step: Whether this is a step message (always shown regardless of verbosity)
-        is_summary: Whether this is a summary message (always shown regardless of verbosity)
-        verbosity: Current verbosity setting from the API request
-    """
-    # Always log step and summary messages
-    if is_step or is_summary or verbosity:
-        logger.info(message)
-
-
 # Create a singleton for model caching with expiration
 _model_cache = {}
 _model_last_used = {}
@@ -160,26 +108,23 @@ def _get_model(model_name: str) -> SentenceTransformer:
         SentenceTransformer: The loaded model instance.
     """
     current_time = time.time()
-
+    
     with _model_lock:
         # Check for expired models first
         expired_models = [
-            name
-            for name, last_used in _model_last_used.items()
+            name for name, last_used in _model_last_used.items() 
             if current_time - last_used > CACHE_TIMEOUT
         ]
-
+        
         # Remove expired models
         for name in expired_models:
-            if (
-                name in _model_cache and name != model_name
-            ):  # Don't remove the one we're about to use
+            if name in _model_cache and name != model_name:  # Don't remove the one we're about to use
                 logger.info(f"Removing expired model {name} from cache")
                 del _model_cache[name]
                 del _model_last_used[name]
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-
+        
         # Update or load the requested model
         if model_name not in _model_cache:
             # Create models directory if it doesn't exist
@@ -193,9 +138,7 @@ def _get_model(model_name: str) -> SentenceTransformer:
                 if local_model_path.exists():
                     # Load from local storage
                     logger.info(f"Loading model from local storage: {local_model_path}")
-                    _model_cache[model_name] = SentenceTransformer(
-                        str(local_model_path)
-                    )
+                    _model_cache[model_name] = SentenceTransformer(str(local_model_path))
                 else:
                     # Download and save model
                     logger.info(
@@ -206,10 +149,10 @@ def _get_model(model_name: str) -> SentenceTransformer:
             except Exception as e:
                 logger.error(f"Error loading model {model_name}: {str(e)}")
                 raise
-
+        
         # Update last used timestamp
         _model_last_used[model_name] = current_time
-
+        
         return _model_cache[model_name]
 
 
@@ -271,7 +214,7 @@ def get_embeddings(
     doc: List[str],
     model: str = EMBEDDER_MODEL,
     batch_size: int = 8,  # Aumentato da 4 a 8 per migliorare la performance
-    verbosity: bool = False,  # Cambiato a False di default
+    show_progress_bar: bool = False,  # Cambiato a False di default
     convert_to_numpy: bool = True,
     normalize_embeddings: bool = True,
 ) -> dict[str, List[float]]:
@@ -281,7 +224,7 @@ def get_embeddings(
         doc (List[str]): List of text strings to generate embeddings for.
         model (str, optional): Name or path of the model to use.
         batch_size (int, optional): Batch size for embedding generation.
-        verbosity (bool, optional): If True, shows all log messages and progress bars.
+        show_progress_bar (bool, optional): Whether to show progress bar.
         convert_to_numpy (bool, optional): Whether to convert output to numpy array.
         normalize_embeddings (bool, optional): Whether to normalize embeddings.
 
@@ -294,18 +237,15 @@ def get_embeddings(
     try:
         # Get model from cache (loads from disk if not in RAM)
         model_instance = _get_model(model)
-
+        
         # Choose device and batch size appropriately
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        
         # Adjust batch size based on document size to prevent OOM errors
         if len(doc) > 1000:
             batch_size = max(1, batch_size // 2)
-            if verbosity:
-                logger.info(
-                    f"Large document detected, reducing batch size to {batch_size}"
-                )
-
+            logger.info(f"Large document detected, reducing batch size to {batch_size}")
+        
         # Move to GPU if available
         if torch.cuda.is_available():
             model_instance = model_instance.to(device)
@@ -314,7 +254,7 @@ def get_embeddings(
         embeddings = model_instance.encode(
             doc,
             batch_size=batch_size,
-            show_progress_bar=verbosity,
+            show_progress_bar=show_progress_bar,
             convert_to_numpy=convert_to_numpy,
             normalize_embeddings=normalize_embeddings,
         )
@@ -334,12 +274,12 @@ def get_embeddings(
 
     except Exception as e:
         logger.error(f"Error generating embeddings: {str(e)}")
-        # Clean GPU memory in case of error too
+        # Cleanup in case of error
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         raise HTTPException(
             status_code=500,
-            detail=f"An unexpected error occurred: {str(e)}",
+            detail=f"Error generating embeddings: {str(e)}",
         )
 
 
@@ -367,72 +307,59 @@ def calculate_similarity(
         if len(vectors) > batch_size:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             similarities = []
-
+            
             for i in range(0, len(vectors) - 1, batch_size):
                 end_idx = min(i + batch_size, len(vectors) - 1)
-                batch_vectors1 = torch.tensor(
-                    vectors[i:end_idx], dtype=torch.float32, device=device
-                )
-                batch_vectors2 = torch.tensor(
-                    vectors[i + 1 : end_idx + 1], dtype=torch.float32, device=device
-                )
-
+                batch_vectors1 = torch.tensor(vectors[i:end_idx], dtype=torch.float32, device=device)
+                batch_vectors2 = torch.tensor(vectors[i+1:end_idx+1], dtype=torch.float32, device=device)
+                
                 # Calculate norms
                 norms1 = torch.linalg.norm(batch_vectors1, dim=1)
                 norms2 = torch.linalg.norm(batch_vectors2, dim=1)
-
+                
                 # Calculate dot products
                 dot_products = torch.sum(batch_vectors1 * batch_vectors2, dim=1)
-
+                
                 # Calculate similarities
                 batch_similarities = 1 - (dot_products / (norms1 * norms2))
-                similarities.extend(
-                    [round(float(sim), 5) for sim in batch_similarities.cpu()]
-                )
-
+                similarities.extend([round(float(sim), 5) for sim in batch_similarities.cpu()])
+                
                 # Clean up batch memory
-                del (
-                    batch_vectors1,
-                    batch_vectors2,
-                    norms1,
-                    norms2,
-                    dot_products,
-                    batch_similarities,
-                )
+                del batch_vectors1, batch_vectors2, norms1, norms2, dot_products, batch_similarities
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-
+            
             return similarities
         else:
             # For smaller documents, process all at once
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             vectors_tensor = torch.tensor(vectors, dtype=torch.float32, device=device)
-
+            
             # Get consecutive pairs
             vectors1 = vectors_tensor[:-1]
             vectors2 = vectors_tensor[1:]
-
+            
             # Calculate norms
             norms = torch.linalg.norm(vectors_tensor, dim=1)
             norms1 = norms[:-1]
             norms2 = norms[1:]
-
+            
             # Calculate dot products
             dot_products = torch.sum(vectors1 * vectors2, dim=1)
-
+            
             # Calculate similarities (using 1 - cosine similarity for angular distance)
             cosine_similarities = dot_products / (norms1 * norms2)
             angular_similarities = 1 - cosine_similarities
-
+            
             # Move to CPU and round
             result = [round(float(sim), 5) for sim in angular_similarities.cpu()]
-
+            
             # Cleanup GPU memory
             if torch.cuda.is_available():
                 del vectors_tensor, vectors1, vectors2, norms, norms1, norms2
                 del dot_products, cosine_similarities, angular_similarities
                 torch.cuda.empty_cache()
-
+            
             return result
 
     except Exception as e:
@@ -496,35 +423,28 @@ def _group_chunks_by_similarity(
 
         # Calculate token counts with multiprocessing for large documents
         if len(chunks) > 100:
-            with ProcessPoolExecutor(
-                max_workers=min(MAX_WORKERS, len(chunks) // 10 + 1)
-            ) as executor:
+            with ProcessPoolExecutor(max_workers=min(MAX_WORKERS, len(chunks)//10 + 1)) as executor:
                 token_args = [(chunk_text, "cl100k_base") for chunk_text in chunks]
                 token_counts = list(executor.map(_count_tokens_for_text, token_args))
         else:
             # For smaller sets, avoid the overhead of multiprocessing
-            token_counts = [
-                _count_tokens_for_text((chunk_text, "cl100k_base"))
-                for chunk_text in chunks
-            ]
+            token_counts = [_count_tokens_for_text((chunk_text, "cl100k_base")) for chunk_text in chunks]
 
         # Create dictionary mapping chunks to token counts
-        chunks_with_tokens = {
-            chunk: count for chunk, count in zip(chunks, token_counts)
-        }
+        chunks_with_tokens = {chunk: count for chunk, count in zip(chunks, token_counts)}
 
         max_tokens = max(token_counts) if token_counts else 0
         average_tokens = sum(token_counts) / len(token_counts) if token_counts else 0
         std_dev = np.std(token_counts) if len(token_counts) > 1 else 0
 
         return chunks_with_tokens, max_tokens, average_tokens, std_dev
-
+        
     except Exception as e:
         logger.error(f"Error in _group_chunks_by_similarity: {str(e)}")
         # Return safe fallback in case of error
         if not sentences:
             return {}, 0, 0, 0
-
+        
         # Single chunk fallback
         combined_text = " ".join(sentences)
         token_count = _count_tokens_for_text((combined_text, "cl100k_base"))
@@ -622,7 +542,6 @@ def parallel_find_optimal_chunks(
     distance: List[float],
     max_tokens: int,
     start_percentile: int = 99,
-    verbosity: bool = True,
 ) -> tuple[dict[str, int], int, float]:
     """Find optimal chunks using parallel batch processing starting from highest percentiles.
 
@@ -639,104 +558,38 @@ def parallel_find_optimal_chunks(
         tuple[dict[str, int], int, float]: Dictionary mapping chunks to token counts,
         percentile used, and average tokens
     """
-    # Get available memory in GB and estimate memory needs based on document size
-    available_memory_gb = psutil.virtual_memory().available / (1024**3)
-
-    if verbosity:
-        logger.info(f"Available system memory: {available_memory_gb:.2f} GB")
-
-    # Estimate memory needed per worker (rough heuristic based on sentence count)
-    estimated_mem_per_worker_gb = max(
-        BASE_MEMORY_PER_WORKER_GB, len(sentences) * MEMORY_PER_SENTENCE_GB
-    )
-    if verbosity:
-        logger.info(
-            f"Estimated memory per worker: {estimated_mem_per_worker_gb:.2f} GB"
-        )
-
-    # Calculate max workers based on available memory (leave RESERVED_SYSTEM_MEMORY_GB for system)
-    # Ensure estimated_mem_per_worker_gb is not zero to prevent DivisionByZeroError
-    if estimated_mem_per_worker_gb <= 0:
-        logger.warning(
-            "Estimated memory per worker is zero or negative, defaulting memory_based_max_workers to 1."
-        )
-        memory_based_max_workers = 1
-    else:
-        memory_based_max_workers = max(
-            1,
-            int(
-                (available_memory_gb - RESERVED_SYSTEM_MEMORY_GB)
-                / estimated_mem_per_worker_gb
-            ),
-        )
-    if verbosity:
-        logger.info(f"Memory-based worker limit: {memory_based_max_workers}")
-
-    # Also consider document size for worker scaling
-    doc_size_factor = min(1.0, DOC_SIZE_FACTOR_SCALER / max(1, len(sentences)))
-    cpu_based_max_workers = max(
-        1, min(MAX_WORKERS, int(multiprocessing.cpu_count() * doc_size_factor))
-    )
-    if verbosity:
-        logger.info(f"CPU-based worker limit: {cpu_based_max_workers}")
-
-    # Take the minimum of memory-based and CPU-based worker counts
-    max_workers = min(memory_based_max_workers, cpu_based_max_workers)
-
-    # Hard cap based on sentence count for very large documents as extra safety
-    if len(sentences) > VERY_LARGE_DOC_SENTENCE_THRESHOLD:
-        max_workers = min(max_workers, WORKERS_VERY_LARGE_DOC)
-        if verbosity:
-            logger.info(
-                f"Very large document (>{VERY_LARGE_DOC_SENTENCE_THRESHOLD} sentences), capping at {WORKERS_VERY_LARGE_DOC} worker(s)"
-            )
-    elif len(sentences) > LARGE_DOC_SENTENCE_THRESHOLD:
-        max_workers = min(max_workers, WORKERS_LARGE_DOC)
-        if verbosity:
-            logger.info(
-                f"Large document (>{LARGE_DOC_SENTENCE_THRESHOLD} sentences), capping at {WORKERS_LARGE_DOC} worker(s)"
-            )
-
+    # Optimize worker count based on document size and available cores
+    workers_scale_factor = min(1.0, len(sentences) / 5000)  # Scale workers based on document size
+    max_workers = max(1, min(MAX_WORKERS, int(multiprocessing.cpu_count() * workers_scale_factor)))
+    
     # For very small documents, skip parallel processing
-    if len(sentences) < MIN_SENTENCES_FOR_PARALLEL:
-        if verbosity:
-            logger.info(
-                f"Small document (<{MIN_SENTENCES_FOR_PARALLEL} sentences), using sequential processing"
-            )
+    if len(sentences) < 100:
+        logger.info("Small document detected, using sequential processing")
         return _find_optimal_chunks(sentences, distance, max_tokens)
-
-    if verbosity:
-        logger.info(f"Using {max_workers} workers for parallel processing")
-
+    
+    logger.info(f"Using {max_workers} workers for parallel processing")
+    
     try:
-        # Scale step size inversely with document size
-        if len(sentences) > STEP_SIZE_VERY_LARGE_DOC_THRESHOLD:
-            initial_step_size = STEP_SIZE_VERY_LARGE_DOC
-        elif len(sentences) > STEP_SIZE_LARGE_DOC_THRESHOLD:
-            initial_step_size = STEP_SIZE_LARGE_DOC
-        else:
-            initial_step_size = STEP_SIZE_DEFAULT
-
-        if verbosity:
-            logger.info(f"Using initial step size of {initial_step_size}")
-
+        # Use larger steps for the initial search
+        initial_step_size = 10
+        
         for batch_start in range(start_percentile, 0, -initial_step_size * max_workers):
             batch_end = max(0, batch_start - initial_step_size * max_workers)
             current_percentiles = range(batch_start, batch_end, -initial_step_size)
-
+            
             process_args = [
                 (sentences, distance, max_tokens, p) for p in current_percentiles
             ]
-
+            
             valid_results = []
-
+            
             # Use a timeout for worker processes to prevent hung processes
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
                     executor.submit(_process_percentile_range, args)
                     for args in process_args
                 ]
-
+                
                 for future in as_completed(futures):
                     try:
                         chunks_with_tokens, percentile, average_tokens = future.result()
@@ -747,66 +600,52 @@ def parallel_find_optimal_chunks(
                     except Exception as e:
                         logger.error(f"Error processing future: {str(e)}")
                         continue
-
+            
             if valid_results:
                 # We found at least one valid percentile, now refine with finer grain
                 valid_results.sort(key=lambda x: x[1], reverse=True)
                 best_valid_percentile = valid_results[0][1]
-
+                
                 # Perform a refined search around the best valid percentile
                 refined_start = min(99, best_valid_percentile + initial_step_size)
                 refined_end = max(1, best_valid_percentile - initial_step_size)
                 refined_percentiles = range(refined_start, refined_end, -1)
-
+                
                 refined_args = [
                     (sentences, distance, max_tokens, p) for p in refined_percentiles
                 ]
                 refined_results = []
-
+                
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     futures = [
                         executor.submit(_process_percentile_range, args)
                         for args in refined_args
                     ]
-
+                    
                     for future in as_completed(futures):
                         try:
-                            chunks_with_tokens, percentile, average_tokens = (
-                                future.result()
-                            )
+                            chunks_with_tokens, percentile, average_tokens = future.result()
                             if chunks_with_tokens is not None:
                                 refined_results.append(
                                     (chunks_with_tokens, percentile, average_tokens)
                                 )
                         except Exception as e:
-                            logger.error(
-                                f"Error processing future in refinement: {str(e)}"
-                            )
+                            logger.error(f"Error processing future in refinement: {str(e)}")
                             continue
-
+                
                 # Combine results and select the best one
                 all_results = valid_results + refined_results
                 all_results.sort(key=lambda x: x[1], reverse=True)
-                best_chunks_with_tokens, best_percentile, best_average_tokens = (
-                    all_results[0]
-                )
-
-                if verbosity:
-                    logger.info(
-                        f"Selected the highest valid percentile: {best_percentile}"
-                    )
+                best_chunks_with_tokens, best_percentile, best_average_tokens = all_results[0]
+                
+                logger.info(f"Selected the highest valid percentile: {best_percentile}")
                 return best_chunks_with_tokens, best_percentile, best_average_tokens
-
-        if verbosity:
-            logger.info(
-                "No valid chunking found in parallel processing, falling back to sequential"
-            )
+        
+        logger.info("No valid chunking found in parallel processing, falling back to sequential")
         return _find_optimal_chunks(sentences, distance, max_tokens)
-
+    
     except Exception as e:
-        logger.error(
-            f"Error in parallel processing: {str(e)}, falling back to sequential approach"
-        )
+        logger.error(f"Error in parallel processing: {str(e)}, falling back to sequential approach")
         return _find_optimal_chunks(sentences, distance, max_tokens)
 
 
@@ -815,7 +654,6 @@ def merge_undersized_chunks(
     min_token_threshold: float,
     max_tokens: int,
     model: str = EMBEDDER_MODEL,
-    verbosity: bool = False,
 ) -> List[dict]:
     """
     Merge chunks that are below a minimum token threshold with semantically similar neighbors.
@@ -825,7 +663,6 @@ def merge_undersized_chunks(
         min_token_threshold (float): Minimum token threshold (e.g., 5th percentile)
         max_tokens (int): Maximum allowed tokens for a chunk
         model (str): Embedding model to use
-        verbosity (bool): If True, shows all log messages and progress bars
 
     Returns:
         List[dict]: Updated list of chunks after merging small ones
@@ -841,7 +678,7 @@ def merge_undersized_chunks(
         return chunks  # No small chunks to merge
 
     total_undersized = len(undersized_indices)
-
+    
     # If most chunks are undersized, adjust the threshold
     if total_undersized > len(chunks) * 0.5:
         logger.info("Too many undersized chunks, adjusting threshold")
@@ -856,32 +693,28 @@ def merge_undersized_chunks(
     # Step 2: Sort undersized chunks by token count (ascending) to process smallest first
     undersized_indices.sort(key=lambda i: chunks[i]["token_count"])
 
-    # Step 3: Calculate initial embeddings for all chunks
-    # We process all chunks in a single batch for efficiency
+    # Step 3: Calculate embeddings for all chunks at once for efficiency
     chunk_texts = [chunk["text"] for chunk in chunks]
 
-    # Get embeddings for all chunks in parallel using batch processing
     embeddings_dict = get_embeddings(
         doc=chunk_texts,
         model=model,
-        batch_size=8,  # Process 8 chunks at a time for optimal performance
-        verbosity=verbosity,
+        batch_size=8,  # Increased batch size
+        show_progress_bar=False,
         convert_to_numpy=True,
-        normalize_embeddings=True,  # Normalized for cosine similarity
+        normalize_embeddings=True,
     )
 
-    # Convert to numpy array while preserving the original chunk order
+    # Convert dictionary result to numpy array in the same order as chunk_texts
     embeddings = np.array([embeddings_dict[text] for text in chunk_texts])
 
-    # Step 4: Initialize data structures for processing
-    result_chunks = list(chunks)  # Working copy of chunks that will be modified
-    merged_indices = set()  # Tracks indices of chunks that have been merged into others
+    # Step 4: Create working copies for processing
+    result_chunks = list(chunks)
+    merged_indices = set()  # Track indices that have been merged
 
-    # Step 5: Process undersized chunks to find best merge candidates
-    # We'll track which chunks need their embeddings updated after merging
-    indices_to_update = []  # Stores indices of chunks that were merged
-    texts_to_update = []  # Stores new text content for merged chunks
-
+    # Step 5: Process each undersized chunk with adaptive similarity threshold
+    base_similarity_threshold = 0.5  # Start with moderate threshold
+    
     for idx in undersized_indices:
         if idx in merged_indices:
             continue  # Skip if this chunk has already been merged
@@ -889,6 +722,11 @@ def merge_undersized_chunks(
         current_chunk = result_chunks[idx]
         candidates = []
 
+        # Calculate dynamic similarity threshold based on chunk size
+        # Smaller chunks can use lower similarity thresholds for merging
+        size_factor = min(1.0, current_chunk["token_count"] / min_token_threshold)
+        adaptive_threshold = base_similarity_threshold * size_factor
+        
         # Check previous chunk if available
         if idx > 0 and idx - 1 not in merged_indices:
             prev_chunk = result_chunks[idx - 1]
@@ -936,38 +774,27 @@ def merge_undersized_chunks(
         # Mark the other chunk as None (to be filtered later)
         result_chunks[removed_idx] = None
 
-        # Mark the removed chunk as merged to prevent future merges with it
+        # Mark indices as merged
         merged_indices.add(removed_idx)
 
-        # Track this merge for batch embedding update
-        indices_to_update.append(target_idx)  # The index that was updated
-        texts_to_update.append(merged_text)  # The new combined text
-
-    # Step 6: Update embeddings for all merged chunks in a single batch
-    # This is more efficient than updating embeddings one at a time
-    if texts_to_update:
-        # Get new embeddings for all merged chunks in parallel
-        new_embeddings_dict = get_embeddings(
-            doc=texts_to_update,
+        # Update embedding for the merged chunk to enable further merges
+        new_embedding_dict = get_embeddings(
+            doc=[merged_text],
             model=model,
-            batch_size=8,  # Process up to 8 chunks at once
-            verbosity=verbosity,
+            batch_size=1,
+            show_progress_bar=False,
             convert_to_numpy=True,
-            normalize_embeddings=True,  # Maintains cosine similarity compatibility
+            normalize_embeddings=True,
         )
-
-        # Update the embeddings array with new values for merged chunks
-        for i, text in zip(indices_to_update, texts_to_update):
-            embeddings[i] = new_embeddings_dict[text]
+        embeddings[target_idx] = new_embedding_dict[merged_text]
 
     # Filter out None values (merged chunks)
     final_chunks = [chunk for chunk in result_chunks if chunk is not None]
 
     # Report merging statistics
-    if verbosity:
-        logger.info(
-            f"After merging: {len(chunks)} → {len(final_chunks)} chunks ({len(chunks) - len(final_chunks)} merged), {total_undersized} originally undersized"
-        )
+    logger.info(
+        f"After merging: {len(chunks)} → {len(final_chunks)} chunks ({len(chunks) - len(final_chunks)} merged), {total_undersized} originally undersized"
+    )
 
     return final_chunks
 
@@ -1001,14 +828,14 @@ def _split_large_sentence(
         total_chars = len(sentence)
         avg_chars_per_token = 4  # Rough estimate
         chars_per_chunk = max_tokens * avg_chars_per_token
-
+        
         chunks = []
         for i in range(0, total_chars, chars_per_chunk):
-            chunk_text = sentence[i : min(i + chars_per_chunk, total_chars)]
+            chunk_text = sentence[i:min(i+chars_per_chunk, total_chars)]
             # Estimate token count
             token_count = len(chunk_text) // avg_chars_per_token
             chunks.append({"text": chunk_text, "token_count": token_count})
-
+            
         return chunks
 
 
@@ -1073,9 +900,7 @@ def split_oversized_chunk(
 
         # Add final chunk if there's anything remaining
         if current_chunk:
-            chunks.append(
-                {"text": " ".join(current_chunk), "token_count": current_tokens}
-            )
+            chunks.append({"text": " ".join(current_chunk), "token_count": current_tokens})
 
         return chunks
     except Exception as e:
@@ -1102,64 +927,6 @@ def validate_file_extension(filename: str) -> None:
             status_code=400,
             detail=f"File extension '.{extension}' is not allowed. Only {', '.join(ALLOWED_EXTENSIONS)} files are accepted",
         )
-
-
-def parse_json_content(content: bytes) -> List[str]:
-    """Parse JSON content and extract text chunks.
-
-    Args:
-        content: Raw bytes from the uploaded file
-
-    Returns:
-        List of text strings from the JSON chunks
-
-    Raises:
-        ValueError: With specific messages for different validation failures
-    """
-    try:
-        data = json.loads(content)
-        if not isinstance(data, dict):
-            raise ValueError("JSON root must be an object")
-
-        if "chunks" not in data:
-            raise ValueError("JSON must contain a 'chunks' key")
-
-        if not isinstance(data["chunks"], list):
-            raise ValueError("JSON 'chunks' must be an array")
-
-        # Protect against excessive chunks
-        MAX_CHUNKS = 10000  # Set a reasonable limit
-        if len(data["chunks"]) > MAX_CHUNKS:
-            raise ValueError(f"JSON contains too many chunks (max: {MAX_CHUNKS})")
-
-        chunks = []
-        for i, item in enumerate(data["chunks"], 1):
-            if not isinstance(item, dict):
-                raise ValueError(f"Chunk {i} must be an object")
-
-            if "text" not in item:
-                raise ValueError(f"Chunk {i} is missing required 'text' field")
-
-            if not isinstance(item["text"], str):
-                raise ValueError(f"Chunk {i} 'text' must be a string")
-
-            # Skip empty strings after stripping
-            text = item["text"].strip()
-            if text:
-                chunks.append(text)
-
-        if not chunks:
-            raise ValueError("No valid text chunks found in JSON")
-
-        # Il log dettagliato verrà gestito dalla funzione chiamante in base all'impostazione di verbosità
-        return chunks
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON format: {str(e)}")
-        raise ValueError(f"Invalid JSON format: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error parsing JSON: {str(e)}")
-        raise ValueError(f"Error parsing JSON: {str(e)}")
 
 
 def validate_file_size(content_length: int) -> None:
@@ -1189,10 +956,6 @@ class ChunkingInput(BaseModel):
     merge_small_chunks: bool = Field(
         default=True,
         description="Whether to merge undersized chunks for more balanced output",
-    )
-    verbosity: bool = Field(
-        default=False,
-        description="If True, shows all log messages. If False, only shows step headers and final statistics.",
     )
 
 
@@ -1237,114 +1000,57 @@ async def health_check():
 
 @app.post("/normalized_semantic_chunker/", response_model=ChunkingResult)
 async def Normalized_Semantic_Chunker(
-    file: UploadFile = File(...),
+    file: UploadFile = File(...), 
     input_data: ChunkingInput = Depends(),
     background_tasks: BackgroundTasks = None,
 ):
     """
-    Process and chunk a text document into smaller, semantically coherent segments using advanced NLP techniques.
-    The function performs the following steps:
-    1. Validates the input file format and size
-    2. Processes the content based on file type
-    3. Splits text into sentences using regex pattern matching
-    4. Generates embeddings for semantic analysis
-    5. Groups sentences into chunks based on semantic similarity
-    6. Handles edge cases like oversized chunks and merges small chunks when needed
+    Process and chunk a text document into smaller, semantically coherent segments.
 
     Args:
-        file (UploadFile): The uploaded file to process. Supported formats:
-            - Text files (.txt, .md): Plain text content that will be split into sentences
-            - JSON files (.json): Expected format: {"chunks": [{"text": "..."}, ...]}
-        input_data (ChunkingInput): Configuration parameters for the chunking process:
-            - max_tokens (int): Maximum number of tokens allowed per chunk. Must be > 0.
-            - model (str, optional): Name or path of the embedding model to use. Defaults to 'sentence-transformers/all-MiniLM-L6-v2'.
-            - merge_small_chunks (bool, optional): If True, merges undersized chunks with semantically similar neighbors. Defaults to True.
-            - show_progress_bar (bool, optional): If True, displays progress bars during long-running operations. Defaults to False.
+        file (UploadFile): The uploaded text file to process (.txt or .md format).
+        input_data (ChunkingInput): Input parameters including:
+            - max_tokens (int): Maximum token count per chunk
+            - model (str): Embedding model name to use for semantic analysis
+            - merge_small_chunks (bool): Whether to merge undersized chunks
 
     Returns:
-        ChunkingResult: Object containing the chunking results with the following structure:
-            - chunks (List[Chunk]): List of processed chunks, each containing:
-                - text (str): The chunk content
-                - token_count (int): Number of tokens in the chunk
-                - id (int): Unique identifier for the chunk
-            - metadata (ChunkingMetadata): Processing statistics and metadata:
-                - n_chunks (int): Total number of chunks created
-                - avg_tokens (float): Average token count across all chunks
-                - max_tokens (int): Maximum token count in any chunk
-                - min_tokens (int): Minimum token count in any chunk
-                - percentile (int): Optimal percentile used for semantic chunking
-                - embedder_model (str): Name of the model used for embeddings
-                - processing_time (float): Total processing time in seconds
+        ChunkingResult: Object containing:
+            - chunks (List[Chunk]): List of text chunks with their token counts
+            - metadata (ChunkingMetadata): Processing statistics including:
+                - n_chunks: Total number of chunks created
+                - avg_tokens: Average token count per chunk
+                - max_tokens: Maximum tokens in any chunk
+                - min_tokens: Minimum tokens in any chunk
+                - percentile: Optimal percentile used for chunking
+                - embedder_model: Model used for embeddings
+                - processing_time: Total processing time in seconds
 
     Raises:
-        HTTPException: With appropriate status codes for various error conditions:
-            - 400: Invalid file format, empty content, or invalid parameters
-            - 413: File size exceeds maximum allowed limit
-            - 500: Internal server error during processing
-            - 422: Validation error for input parameters
+        HTTPException: 400 if file format is invalid or processing fails
     """
     start_time = time.time()
 
     try:
         # Validate file extension
         validate_file_extension(file.filename)
-
+        
         # Read and validate file size
         content = await file.read()
         validate_file_size(len(content))
+        
+        # Decode file content
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            # Try with different encoding if UTF-8 fails
+            text = content.decode("latin-1")
 
-        # Check if file is JSON
-        if file.filename.lower().endswith(".json"):
-            try:
-                # Parse JSON content directly
-                logger.info("Step 1 - JSON file processing")
-                sentences = parse_json_content(content)
-                if input_data.verbosity:
-                    logger.info(f"Extracted {len(sentences)} text chunks from JSON")
-            except ValueError as e:
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid JSON format: {str(e)}"
-                )
-        else:
-            # Handle text files (txt, md)
-            try:
-                text = content.decode("utf-8")
-            except UnicodeDecodeError:
-                # Try with different encoding if UTF-8 fails
-                text = content.decode("latin-1")
-
-            # Step 1: Split the document into sentences
-            logger.info("Step 1 - Text Splitting")
-            try:
-                if input_data.verbosity:
-                    logger.info("Using regex-based text splitting")
-                sentences = split_into_sentences(text)
-                if input_data.verbosity:
-                    logger.info(f"Number of sentences: {len(sentences)}")
-            except ValueError as ve:
-                # Handle validation errors (like None inputs or wrong types)
-                logger.error(f"Validation error during sentence splitting: {str(ve)}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid input for sentence splitting: {str(ve)}",
-                )
-            except RuntimeError as re:
-                # Handle runtime errors from the sentence splitting functions
-                logger.error(f"Runtime error during sentence splitting: {str(re)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error processing document with sentence splitting: {str(re)}",
-                )
-            except Exception as e:
-                # Catch any other unexpected errors
-                logger.error(
-                    f"Unexpected error during sentence splitting (method: {'newline' if input_data.use_newline_splitting else 'regex'}): {str(e)}"
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Unexpected error during sentence splitting: {str(e)}",
-                )
-
+        # Step 1: Split the document into sentences
+        logger.info("Step 1 - Sentence Splitting")
+        sentences = split_into_sentences(text)
+        logger.info(f"Number of sentences: {len(sentences)}")
+        
         if not sentences:
             raise HTTPException(
                 status_code=400,
@@ -1353,11 +1059,7 @@ async def Normalized_Semantic_Chunker(
 
         # Step 2: Vector embedding
         logger.info("Step 2 - Vector Embedding")
-        embeddings_dict = get_embeddings(
-            sentences,
-            model=input_data.model,
-            verbosity=input_data.verbosity,
-        )
+        embeddings_dict = get_embeddings(sentences, input_data.model)
 
         # Step 3: Calculate sentence vector distances
         logger.info("Step 3 - Sentence Vector Distances Calculation")
@@ -1366,12 +1068,9 @@ async def Normalized_Semantic_Chunker(
         # Step 4: Semantic chunking - now returns dictionary with token counts
         logger.info("Step 4 - Semantic Chunking")
         chunks_with_tokens, percentile, average_tokens = parallel_find_optimal_chunks(
-            sentences,
-            sentence_vector_distance,
-            input_data.max_tokens,
-            verbosity=input_data.verbosity,
+            sentences, sentence_vector_distance, input_data.max_tokens
         )
-
+        
         # Check if valid percentile was found, otherwise raise exception
         if not percentile:
             logger.warning("No valid percentile found for chunking")
@@ -1406,36 +1105,31 @@ async def Normalized_Semantic_Chunker(
         chunks_over_95th = sum(1 for count in token_counts if count > percentile_95th)
         chunks_in_range = total_chunks - chunks_under_5th - chunks_over_95th
 
-        # STEP 5: Add to log
+        # Add to log
         logger.info("Step 5 - Distribution Statistics Calculation")
-
-        # Statistiche dettagliate mostrate solo in modalità verbosa
-        if input_data.verbosity:
-            logger.info(f"Mean tokens: {mean_tokens:.2f}")
-            logger.info(f"Total chunks: {total_chunks}")
-            logger.info(f"5th percentile threshold: {percentile_5th:.2f} tokens")
-            logger.info(f"95th percentile threshold: {percentile_95th:.2f} tokens")
-            logger.info(
-                f"Number of chunks under 5th percentile: {chunks_under_5th} ({chunks_under_5th / total_chunks * 100:.2f}%)"
-            )
-            logger.info(
-                f"Number of chunks in 5-95th percentile: {chunks_in_range} ({chunks_in_range / total_chunks * 100:.2f}%)"
-            )
-            logger.info(
-                f"Number of chunks over 95th percentile: {chunks_over_95th} ({chunks_over_95th / total_chunks * 100:.2f}%)"
-            )
+        logger.info(f"Mean tokens: {mean_tokens:.2f}")
+        logger.info(f"5th percentile threshold: {percentile_5th:.2f} tokens")
+        logger.info(f"95th percentile threshold: {percentile_95th:.2f} tokens")
+        logger.info(f"Total chunks: {total_chunks}")
+        logger.info(
+            f"Number of chunks under 5th percentile: {chunks_under_5th} ({chunks_under_5th / total_chunks * 100:.2f}%)"
+        )
+        logger.info(
+            f"Number of chunks in 5-95th percentile: {chunks_in_range} ({chunks_in_range / total_chunks * 100:.2f}%)"
+        )
+        logger.info(
+            f"Number of chunks over 95th percentile: {chunks_over_95th} ({chunks_over_95th / total_chunks * 100:.2f}%)"
+        )
 
         # STEP 6: Merge undersized chunks if enabled
         if input_data.merge_small_chunks and chunks_under_5th > 0:
             logger.info("Step 6 - Merge Undersized Chunks")
-            if input_data.verbosity:
-                logger.info("Merge process for chunks under 5th percentile")
+            logger.info("Merge process for chunks under 5th percentile")
             final_chunks = merge_undersized_chunks(
                 chunks=final_chunks,
                 min_token_threshold=percentile_5th,
-                max_tokens=input_data.max_tokens // 2,
+                max_tokens=input_data.max_tokens,
                 model=input_data.model,
-                verbosity=input_data.verbosity,
             )
 
         # STEP 7: Split oversized chunks
@@ -1447,11 +1141,10 @@ async def Normalized_Semantic_Chunker(
         ]
 
         if oversized_indices:
-            if input_data.verbosity:
-                logger.info("Starting split process for oversized chunks")
-                logger.info(
-                    f"Found {len(oversized_indices)} chunks over threshold of {input_data.max_tokens} tokens"
-                )
+            logger.info("Starting split process for oversized chunks")
+            logger.info(
+                f"Found {len(oversized_indices)} chunks over threshold of {input_data.max_tokens} tokens"
+            )
 
         normalized_chunks = []
 
@@ -1466,24 +1159,22 @@ async def Normalized_Semantic_Chunker(
         final_chunks = normalized_chunks
 
         token_counts_after_split = [chunk["token_count"] for chunk in final_chunks]
-
+        
         if not token_counts_after_split:
             raise HTTPException(
                 status_code=500,
                 detail="Chunking failed after splitting process. Please try with different parameters.",
             )
-
+            
         mean_tokens_after_split = np.mean(token_counts_after_split)
         max_tokens_after_split = max(token_counts_after_split)
 
-        if input_data.verbosity:
-            logger.info(
-                f"After splitting: {len(final_chunks)} total chunks (increased from {chunks_before_split} to {len(final_chunks)}, +{len(final_chunks) - chunks_before_split})"
-            )
+        logger.info(
+            f"After splitting: {len(final_chunks)} total chunks (increased from {chunks_before_split} to {len(final_chunks)}, +{len(final_chunks) - chunks_before_split})"
+        )
 
         logger.info("Step 8 - Semantic Chunking Statistics after processing")
 
-        # Statistiche finali mostrate sempre, indipendentemente dalla verbosity
         logger.info(f"Mean tokens: {mean_tokens_after_split:.2f}")
         logger.info(f"Total chunks: {len(final_chunks)}")
         logger.info(f"Smallest chunk: {min(token_counts_after_split)} tokens")
@@ -1511,14 +1202,12 @@ async def Normalized_Semantic_Chunker(
 
         # Schedule cleanup after response is sent
         if background_tasks:
-            background_tasks.add_task(
-                lambda: torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            )
+            background_tasks.add_task(lambda: torch.cuda.empty_cache() if torch.cuda.is_available() else None)
 
         end_time = time.time()
         logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
         return result
-
+        
     except HTTPException:
         # Re-raise HTTP exceptions as is
         raise
