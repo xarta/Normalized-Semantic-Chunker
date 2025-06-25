@@ -14,9 +14,29 @@ Essentially, it's a smart text splitter designed to keep related ideas together 
 
 To use this service, you need to send it a request containing:
 
-*   **A Text File:** You must upload a file containing the text you want to chunk. The code specifically allows files ending in `.txt` or `.md` (Markdown).
+*   **A Text File:** You must upload a file containing the text you want to chunk. The code specifically allows files ending in `.txt`, `.md` (Markdown), or `.json` (JSON).
 *   **Maximum Tokens:** You need to tell the code the maximum number of tokens (words/word pieces) allowed in each chunk. This is a required number and must be greater than zero.
-*   **(Optional) Model Name:** The code uses a specific AI model (called an "embedding model") to understand the meaning of sentences. By default, it uses one called `"BAAI/bge-m3"`, but you can optionally specify a different compatible model name if needed.
+*   **(Optional) Model Name:** The code uses a specific AI model (called an "embedding model") to understand the meaning of sentences. By default, it uses one called `"sentence-transformers/all-MiniLM-L6-v2"`, but you can optionally specify a different compatible model name if needed.
+*   **(Optional) Merge Small Chunks:** You can specify whether to merge undersized chunks with semantically similar neighbors (default: `true`).
+*   **(Optional) Verbosity:** You can specify whether to show detailed logs during processing (default: `false`).
+
+**JSON Input Format:**
+If you are using a JSON file as input, it must follow this structure:
+```json
+{
+  "chunks": [
+    {
+      "text": "First chunk of text content...",
+      "metadata_field": "Additional metadata is allowed..."
+    },
+    {
+      "text": "Second chunk of text content...",
+      "id": 12345
+    }
+  ]
+}
+```
+The service will process each text chunk individually, maintaining the chunk boundaries provided in your JSON file. Additional metadata fields beyond `text` are allowed and will be ignored during processing.
 
 **3. Output(s) it Produces**
 

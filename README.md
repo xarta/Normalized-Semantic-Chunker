@@ -1,6 +1,6 @@
 ![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
 ![CUDA 12.1](https://img.shields.io/badge/CUDA-12.1-blue)
-![Python 3.10](https://img.shields.io/badge/Python-3.10-blue)
+![Python 3.11](https://img.shields.io/badge/Python-3.11-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Latest-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
 
@@ -12,7 +12,7 @@ The Normalized Semantic Chunker is a cutting-edge tool that unlocks the full pot
 This innovative solution builds upon concepts from [YouTube's Advanced Text Splitting for RAG](https://www.youtube.com/watch?v=8OJC21T2SL4&t=1930s) and implementation patterns from [LangChain's semantic chunker documentation](https://python.langchain.com/docs/how_to/semantic-chunker/).
 Conventional semantic chunkers prioritize content coherence but often produce chunks with highly variable token counts. This leads to issues like context window overflow and inconsistent retrieval quality, significantly impacting token-sensitive applications such as retrieval-augmented generation (RAG).
 The Normalized Semantic Chunker overcomes these challenges by combining semantic cohesion with statistical guarantees for token size compliance. It ensures chunks are not only semantically meaningful but also fall within an optimal size range in terms of token count. This enables more precise and efficient text preparation for embeddings, RAG pipelines, and other NLP applications.
-Whether working with long documents, varied content structures, or token-sensitive NLP architectures, the Normalized Semantic Chunker provides a robust, adaptable solution for optimizing text segmentation. 
+Whether working with long documents, varied content structures, or token-sensitive NLP architectures, the Normalized Semantic Chunker provides a robust, adaptable solution for optimizing text segmentation.
 
 
 ## Key Features
@@ -25,6 +25,10 @@ Whether working with long documents, varied content structures, or token-sensiti
 -   **Comprehensive Processing Pipeline**: From raw text to optimized chunks in a single workflow.
 -   **Universal REST API with FastAPI**: Modern, high-performance API interface with automatic documentation, data validation, and seamless integration capabilities for any system or language.
 -   **Docker Integration**: Easy deployment with Docker and docker-compose.
+-   **Adaptive Processing**: Adjusts processing parameters based on document size for optimal resource usage.
+-   **Model Caching**: Caches embedding models with timeout for improved performance.
+-   **Format Support**: Handles text (.txt), markdown (.md), and structured JSON (.json) files.
+-   **Resource Management**: Intelligently manages system resources based on available RAM and CPU cores.
 
 ## Table of Contents
 
@@ -56,7 +60,7 @@ The core innovation of Normalized Semantic Chunker lies in its multi-step pipeli
 
 1. The application exposes a simple REST API endpoint where users can upload a text document and parameters for maximum token limits and embedding model selection. 
 2. The text is initially split into sentences using sophisticated regex pattern matching.
-3. Each sentence is transformed into a vector embedding using state-of-the-art transformer models (default: `BAAI/bge-m3`).
+3. Each sentence is transformed into a vector embedding using state-of-the-art transformer models (default: `sentence-transformers/all-MiniLM-L6-v2`).
 4. The angular similarity between consecutive sentence vectors is calculated.
 5. A parallel search algorithm identifies the optimal percentile of the similarity distribution that respects the specified size constraints.
 6. Chunks are formed by grouping sentences across boundaries identified by the chosen percentile.
@@ -103,7 +107,7 @@ This parallel implementation allows for quickly finding the best balance between
 | Semantic Cohesion | Can split related concepts | Preserves semantic cohesion via similarity analysis |
 | Outlier Handling | Limited or absent | Intelligent merging of small chunks & splitting of large ones |
 | Parallelization | Rarely implemented | Built-in parallel multi-core optimization |
-| Adaptability | Requires manual parameter tuning | Automatically finds optimal parameters for each document |
+| Adaptability | Requires manual parameter tuning | Automatically finds optimal parameters for each document type and size |
 
 ## Advantages of the Solution
 
@@ -121,15 +125,16 @@ The parallel implementation and statistical approach offer:
 
 - **Processing Speed**: Parallel optimization on multi-core systems.
 - **GPU Acceleration**: Fast embedding generation using CUDA-enabled PyTorch.
-- **Scalability**: Efficient handling of large documents.
+- **Scalability**: Efficient handling of large documents with adaptive processing based on document size.
 - **Consistent Quality**: Predictable and reliable results regardless of text type.
+- **Resource Management**: Intelligent allocation of CPU cores and memory based on document size and system resources.
 
 ### Flexibility and Customization
 
 The algorithm adapts automatically to different types of content:
 
 - **Adaptive Parameters**: Automatic identification of the best chunking parameters for each document.
-- **Configurability**: Ability to specify custom maximum token limits (max_tokens).
+- **Configurability**: Ability to specify custom maximum token limits (max_tokens) and control small chunk merging.
 - **Extensibility**: Modular architecture easily extendable with new features.
 - **Embedding Model Selection**: Switch between different transformer models based on your needs.
 
@@ -140,7 +145,7 @@ The algorithm adapts automatically to different types of content:
 - Docker and Docker Compose (for Docker deployment)
 - NVIDIA GPU with CUDA support (recommended)
 - NVIDIA Container Toolkit (for GPU passthrough in Docker)
-- Python 3.10-3.12 (Python 3.11 recommended, Python 3.13 not supported due to dependency compatibility issues)
+- Python 3.10-3.12 (Python 3.11 specifically recommended, Python 3.13+ not supported due to issues with PyTorch and sentence-transformers dependencies)
 
 ### Getting the Code
 
@@ -252,14 +257,35 @@ cd Normalized-Semantic-Chunker
   Chunks a text document into semantically coherent segments while controlling token size.
   
   **Parameters:**
-  - `file`: The text file to be chunked (supports .txt and .md formats)
+  - `file`: The text file to be chunked (supports .txt, .md, and .json formats)
   - `max_tokens`: Maximum token count per chunk (integer, required)
-  - `model`: Embedding model to use for semantic analysis (string, default: `BAAI/bge-m3`)
+  - `model`: Embedding model to use for semantic analysis (string, default: `sentence-transformers/all-MiniLM-L6-v2`)
+  - `merge_small_chunks`: Whether to merge undersized chunks (boolean, default: `true`)
+  - `verbosity`: Show detailed logs (boolean, default: `false`)
   
   **Response:**
   Returns a JSON object containing:
   - `chunks`: Array of text segments with their token counts and IDs
   - `metadata`: Processing statistics including chunk count, token statistics, percentile used, model name, and processing time
+
+  **JSON Input Format:**
+  When using JSON files as input, the expected structure is:
+  ```json
+  {
+    "chunks": [
+      {
+        "text": "First chunk of text content...",
+        "metadata_field": "Additional metadata is allowed..."
+      },
+      {
+        "text": "Second chunk of text content...",
+        "id": 12345
+      },
+      ...
+    ]
+  }
+  ```
+  The service will process each text chunk individually, maintaining the chunk boundaries provided in your JSON file, then apply semantic chunking within those boundaries as needed. Additional metadata fields beyond `text` are allowed and will be ignored during processing, so you can include any extra information you need while still having the JSON process correctly.
 
 - **GET `/`**  
   Health check endpoint that returns service status, GPU availability, and API version.
@@ -272,7 +298,7 @@ curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512"
   -F "file=@document.txt" 
 
 # With all parameters specified
-curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512&model=BAAI/bge-m3" \
+curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512&model=sentence-transformers/all-MiniLM-L6-v2&merge_small_chunks=true&verbosity=false" \
   -F "file=@document.txt" \
   -H "accept: application/json"
 
@@ -290,12 +316,18 @@ import json
 api_url = 'http://localhost:8000/normalized_semantic_chunker/'
 file_path = 'document.txt' # Your input text file
 max_tokens_per_chunk = 512
-# model_name = "BAAI/bge-m3" # Optional: specify a different model
+# model_name = "sentence-transformers/all-MiniLM-L6-v2" # Optional: specify a different model
+merge_small_chunks = True  # Whether to merge undersized chunks with semantically similar neighbors
+verbosity = False  # Whether to show detailed logs
 
 try:
     with open(file_path, 'rb') as f:
         files = {'file': (file_path, f, 'text/plain')}
-        params = {'max_tokens': max_tokens_per_chunk}
+        params = {
+            'max_tokens': max_tokens_per_chunk,
+            'merge_small_chunks': merge_small_chunks,
+            'verbosity': verbosity
+        }
         # if model_name: # Uncomment to specify a model
         #     params['model'] = model_name
 
@@ -353,7 +385,7 @@ A successful chunking operation returns a `ChunkingResult` object:
     "max_tokens": 510,
     "min_tokens": 150,
     "percentile": 85,
-    "embedder_model": "BAAI/bge-m3",
+    "embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
     "processing_time": 15.78
   }
 }
