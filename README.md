@@ -1,5 +1,5 @@
 ![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
-![CUDA 12.1](https://img.shields.io/badge/CUDA-12.1-blue)
+![CUDA 12.6](https://img.shields.io/badge/CUDA-12.6-blue)
 ![Python 3.11](https://img.shields.io/badge/Python-3.11-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Latest-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
@@ -386,6 +386,7 @@ A successful chunking operation returns a `ChunkingResult` object:
     "min_tokens": 150,
     "percentile": 85,
     "embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "source": "your-document-source.txt",
     "processing_time": 15.78
   }
 }

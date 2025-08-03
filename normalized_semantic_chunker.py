@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Normalized Semantic Chunker",
     description="API for processing and chunking text documents into smaller, semantically coherent segments",
-    version="0.7.0",
+    version="0.7.1",
     lifespan=lifespan,
 )
 
@@ -1203,6 +1203,7 @@ class ChunkingMetadata(BaseModel):
     min_tokens: int
     percentile: int
     embedder_model: str
+    source: str
     processing_time: float
 
 
@@ -1505,6 +1506,7 @@ async def Normalized_Semantic_Chunker(
                 min_tokens=min(chunk["token_count"] for chunk in final_chunks),
                 percentile=percentile,
                 embedder_model=input_data.model,
+                source=file.filename,  # Use filename as the source
                 processing_time=processing_time,
             ),
         )

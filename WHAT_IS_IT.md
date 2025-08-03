@@ -53,6 +53,7 @@ When the code successfully processes your file, it sends back a result containin
     *   `min_tokens`: The token count of the smallest chunk created.
     *   `percentile`: A number indicating how aggressively the code split the text based on meaning changes (explained more below).
     *   `embedder_model`: The name of the AI model used to understand sentence meaning.
+    *   `source`: The name of the file that was uploaded.
     *   `processing_time`: How long the whole process took in seconds.
 
 The code also includes a simple "health check" address (`/`) that just confirms the service is running and whether it can use a GPU (a powerful type of processor).

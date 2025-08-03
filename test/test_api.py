@@ -75,11 +75,17 @@ def test_alice_file_processing(client):
         "min_tokens",
         "percentile",
         "embedder_model",
+        "source",
         "processing_time",
     ]
 
     for field in required_metadata_fields:
         assert field in metadata, f"Missing required metadata field: {field}"
+
+    # Validate the source field value
+    assert (
+        metadata["source"] == "alice_in_wonderland.txt"
+    ), f"Source field incorrect: expected 'alice_in_wonderland.txt', got '{metadata['source']}'"
 
     # Validate chunks structure
     for chunk in chunks:
