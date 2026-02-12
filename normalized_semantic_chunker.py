@@ -5,17 +5,24 @@ import logging
 import re
 import psutil
 import tiktoken
-import torch
 import multiprocessing
 import numpy as np
+import httpx
 from logging.handlers import RotatingFileHandler
-from sentence_transformers import SentenceTransformer
 from typing import List, Optional, Dict, Union
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from contextlib import asynccontextmanager
+
+# Conditional imports — only needed for local embedding backend
+try:
+    import torch
+    from sentence_transformers import SentenceTransformer
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 
 
 RESERVED_SYSTEM_MEMORY_GB = 4.0  # GB of RAM to keep free for the OS and other processes
@@ -55,36 +62,56 @@ MAX_WORKERS = int(
 )
 CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 ora in secondi
 
+# Embedding backend selection: "local" (sentence-transformers) or "vllm" (remote API)
+EMBEDDING_BACKEND = os.environ.get("EMBEDDING_BACKEND", "local")
+# Remote embedding endpoint configuration (used when EMBEDDING_BACKEND="vllm")
+EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "")
+EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
+EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "")  # auto-detect if empty
+EMBEDDING_TIMEOUT = int(os.environ.get("EMBEDDING_TIMEOUT", 120))
+EMBEDDING_MAX_RETRIES = int(os.environ.get("EMBEDDING_MAX_RETRIES", 3))
+EMBEDDING_RETRY_BASE_DELAY = float(os.environ.get("EMBEDDING_RETRY_BASE_DELAY", 1.0))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(
-        f"Loading embedding model {EMBEDDER_MODEL} during application startup..."
-    )
-    try:
-        _get_model(EMBEDDER_MODEL)
-        logger.info("Embedding model loaded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to load embedding model: {str(e)}")
+    if EMBEDDING_BACKEND == "vllm":
+        logger.info("Using remote embedding backend (vLLM)")
+        try:
+            model_name = _detect_vllm_model()
+            logger.info(f"Remote embedding model detected: {model_name}")
+        except Exception as e:
+            logger.error(f"Failed to connect to remote embedding endpoint: {str(e)}")
+    else:
+        if not _HAS_TORCH:
+            logger.error("Local backend selected but torch/sentence-transformers not installed")
+        else:
+            logger.info(
+                f"Loading embedding model {EMBEDDER_MODEL} during application startup..."
+            )
+            try:
+                _get_model(EMBEDDER_MODEL)
+                logger.info("Embedding model loaded successfully.")
+            except Exception as e:
+                logger.error(f"Failed to load embedding model: {str(e)}")
 
     yield
 
     # Cleanup
     logger.info("Application shutting down, cleaning up resources...")
-    try:
-        # Cleanup model cache
-        with _model_lock:
-            for model_name in list(_model_cache.keys()):
-                if model_name in _model_cache:
-                    del _model_cache[model_name]
-                    logger.info(f"Removed model {model_name} from cache")
+    if EMBEDDING_BACKEND == "local" and _HAS_TORCH:
+        try:
+            with _model_lock:
+                for model_name in list(_model_cache.keys()):
+                    if model_name in _model_cache:
+                        del _model_cache[model_name]
+                        logger.info(f"Removed model {model_name} from cache")
 
-        # Cleanup GPU memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            logger.info("GPU memory cleared during shutdown")
-    except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("GPU memory cleared during shutdown")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
 
 
 app = FastAPI(
@@ -149,8 +176,168 @@ _model_cache = {}
 _model_last_used = {}
 _model_lock = multiprocessing.RLock()  # Thread-safe lock for model cache
 
+# Cache for detected vLLM model name
+_detected_vllm_model: Optional[str] = None
 
-def _get_model(model_name: str) -> SentenceTransformer:
+
+def _detect_vllm_model() -> str:
+    """Detect the model served by the remote embedding endpoint.
+
+    Calls /v1/models and returns the first model ID.
+    Caches the result for subsequent calls.
+
+    Returns:
+        str: The model ID served by the endpoint.
+
+    Raises:
+        RuntimeError: If the endpoint is unreachable or returns no models.
+    """
+    global _detected_vllm_model
+    if _detected_vllm_model:
+        return _detected_vllm_model
+
+    if not EMBEDDING_BASE_URL:
+        raise RuntimeError("EMBEDDING_BASE_URL not configured")
+
+    url = f"{EMBEDDING_BASE_URL}/models"
+    headers = {"Content-Type": "application/json"}
+    if EMBEDDING_API_KEY:
+        headers["Authorization"] = f"Bearer {EMBEDDING_API_KEY}"
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            models = data.get("data", [])
+            if models:
+                _detected_vllm_model = models[0]["id"]
+                return _detected_vllm_model
+            raise RuntimeError("No models returned from /v1/models")
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(f"Model detection failed: HTTP {exc.response.status_code}")
+    except httpx.ConnectError as exc:
+        raise RuntimeError(f"Model detection failed: {exc}")
+
+
+def _vllm_request_with_retry(
+    url: str,
+    payload: dict,
+    headers: dict,
+    max_retries: int = EMBEDDING_MAX_RETRIES,
+    base_delay: float = EMBEDDING_RETRY_BASE_DELAY,
+) -> dict:
+    """Make an HTTP POST with retry logic (429 exponential backoff, 5xx flat retry).
+
+    Args:
+        url: Full endpoint URL.
+        payload: JSON request body.
+        headers: HTTP headers.
+        max_retries: Maximum retry count.
+        base_delay: Base delay for backoff.
+
+    Returns:
+        dict: Parsed JSON response.
+
+    Raises:
+        HTTPException: On non-transient errors or retries exhausted.
+    """
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            with httpx.Client(timeout=float(EMBEDDING_TIMEOUT)) as client:
+                response = client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 429:
+                wait = (2 ** attempt) * base_delay
+                logger.warning(f"Rate limited (429), retrying in {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                last_error = exc
+            elif status >= 500:
+                logger.warning(f"Server error ({status}), retrying in {base_delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(base_delay)
+                last_error = exc
+            else:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Embedding API error: HTTP {status}",
+                )
+        except httpx.ConnectError as exc:
+            logger.warning(f"Connection error, retrying in {base_delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(base_delay)
+            last_error = exc
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"Embedding API unavailable after {max_retries} retries: {last_error}",
+    )
+
+
+def get_embeddings_vllm(
+    doc: List[str],
+    model: str = None,
+    **kwargs,
+) -> dict:
+    """Get embeddings via a remote OpenAI-compatible embedding API.
+
+    Sends a single batch request for all input texts. Supports retry
+    with exponential backoff on 429 and flat retry on 5xx.
+
+    Args:
+        doc: List of text strings to embed.
+        model: Model name override. Auto-detected if not provided.
+
+    Returns:
+        dict: Mapping of input text to normalised embedding vector.
+
+    Raises:
+        HTTPException: On API errors after retries exhausted.
+    """
+    if not doc:
+        return {}
+
+    if not EMBEDDING_BASE_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="EMBEDDING_BASE_URL not configured",
+        )
+
+    # Resolve model name
+    model_name = model
+    if not model_name or model_name == EMBEDDER_MODEL:
+        model_name = EMBEDDING_MODEL_NAME or _detect_vllm_model()
+
+    url = f"{EMBEDDING_BASE_URL}/embeddings"
+    headers = {"Content-Type": "application/json"}
+    if EMBEDDING_API_KEY:
+        headers["Authorization"] = f"Bearer {EMBEDDING_API_KEY}"
+
+    payload = {
+        "input": doc,
+        "model": model_name,
+    }
+
+    data = _vllm_request_with_retry(url, payload, headers)
+
+    # Build result dict, normalise vectors, re-order by index
+    embeddings_dict = {}
+    for item in data.get("data", []):
+        idx = item.get("index", 0)
+        if 0 <= idx < len(doc):
+            vec = np.array(item["embedding"], dtype=np.float32)
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            embeddings_dict[doc[idx]] = vec.tolist()
+
+    return embeddings_dict
+
+
+def _get_model(model_name: str) -> "SentenceTransformer":
     """Get model from cache or load it into RAM with cache expiration.
 
     Args:
@@ -267,38 +454,40 @@ def split_into_sentences(doc: str) -> List[str]:
     return [s for s in sentences if s]
 
 
-def get_embeddings(
+def get_embeddings_local(
     doc: List[str],
     model: str = EMBEDDER_MODEL,
-    batch_size: int = 8,  # Aumentato da 4 a 8 per migliorare la performance
-    verbosity: bool = False,  # Cambiato a False di default
+    batch_size: int = 8,
+    verbosity: bool = False,
     convert_to_numpy: bool = True,
     normalize_embeddings: bool = True,
-) -> dict[str, List[float]]:
-    """Generate embeddings for a list of text strings using a Sentence Transformer model.
+) -> dict:
+    """Generate embeddings using local sentence-transformers model.
 
     Args:
-        doc (List[str]): List of text strings to generate embeddings for.
-        model (str, optional): Name or path of the model to use.
-        batch_size (int, optional): Batch size for embedding generation.
-        verbosity (bool, optional): If True, shows all log messages and progress bars.
-        convert_to_numpy (bool, optional): Whether to convert output to numpy array.
-        normalize_embeddings (bool, optional): Whether to normalize embeddings.
+        doc: List of text strings to generate embeddings for.
+        model: Name or path of the model to use.
+        batch_size: Batch size for embedding generation.
+        verbosity: If True, shows all log messages and progress bars.
+        convert_to_numpy: Whether to convert output to numpy array.
+        normalize_embeddings: Whether to normalize embeddings.
 
     Returns:
-        dict[str, List[float]]: Dictionary mapping input strings to their embeddings.
+        dict: Dictionary mapping input strings to their embeddings.
 
     Raises:
         HTTPException: If there's an error during the embedding process.
     """
-    try:
-        # Get model from cache (loads from disk if not in RAM)
-        model_instance = _get_model(model)
+    if not _HAS_TORCH:
+        raise HTTPException(
+            status_code=500,
+            detail="Local embedding backend requires torch and sentence-transformers",
+        )
 
-        # Choose device and batch size appropriately
+    try:
+        model_instance = _get_model(model)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Adjust batch size based on document size to prevent OOM errors
         if len(doc) > 1000:
             batch_size = max(1, batch_size // 2)
             if verbosity:
@@ -306,11 +495,9 @@ def get_embeddings(
                     f"Large document detected, reducing batch size to {batch_size}"
                 )
 
-        # Move to GPU if available
         if torch.cuda.is_available():
             model_instance = model_instance.to(device)
 
-        # Get embeddings
         embeddings = model_instance.encode(
             doc,
             batch_size=batch_size,
@@ -319,12 +506,10 @@ def get_embeddings(
             normalize_embeddings=normalize_embeddings,
         )
 
-        # Create dictionary mapping sentences to embeddings
         result = {
             sentence: embedding.tolist() for sentence, embedding in zip(doc, embeddings)
         }
 
-        # Cleanup GPU memory but keep model in RAM
         if torch.cuda.is_available():
             model_instance.cpu()
             del embeddings
@@ -334,8 +519,7 @@ def get_embeddings(
 
     except Exception as e:
         logger.error(f"Error generating embeddings: {str(e)}")
-        # Clean GPU memory in case of error too
-        if torch.cuda.is_available():
+        if _HAS_TORCH and torch.cuda.is_available():
             torch.cuda.empty_cache()
         raise HTTPException(
             status_code=500,
@@ -343,101 +527,82 @@ def get_embeddings(
         )
 
 
-def calculate_similarity(
-    embeddings_dict: dict[str, List[float]], sentences: List[str]
-) -> List[float]:
-    """Calculate similarity scores between consecutive vectors in sentence order.
+def get_embeddings(
+    doc: List[str],
+    model: str = EMBEDDER_MODEL,
+    batch_size: int = 8,
+    verbosity: bool = False,
+    convert_to_numpy: bool = True,
+    normalize_embeddings: bool = True,
+    **kwargs,
+) -> dict:
+    """Generate embeddings using the configured backend.
+
+    Routes to either the remote vLLM API or local sentence-transformers
+    based on the EMBEDDING_BACKEND environment variable.
 
     Args:
-        embeddings_dict (dict[str, List[float]]): Dictionary mapping sentences to vectors
-        sentences (List[str]): Sentences in original order
+        doc: List of text strings to generate embeddings for.
+        model: Name or path of the model to use.
+        batch_size: Batch size (only used for local backend).
+        verbosity: If True, shows log messages.
+        convert_to_numpy: Whether to convert output to numpy (local only).
+        normalize_embeddings: Whether to normalize embeddings (local only).
 
     Returns:
-        List[float]: List of similarity scores between consecutive vector pairs
+        dict: Dictionary mapping input strings to their embeddings.
+    """
+    if EMBEDDING_BACKEND == "vllm":
+        return get_embeddings_vllm(doc, model=model)
+    else:
+        return get_embeddings_local(
+            doc, model, batch_size, verbosity,
+            convert_to_numpy, normalize_embeddings,
+        )
+
+
+def calculate_similarity(
+    embeddings_dict: dict, sentences: List[str]
+) -> List[float]:
+    """Calculate angular distance between consecutive sentence embeddings.
+
+    Uses numpy for all computation — no torch/GPU required.
+
+    Args:
+        embeddings_dict: Dictionary mapping sentences to embedding vectors.
+        sentences: Sentences in original order.
+
+    Returns:
+        List of angular distances between consecutive vector pairs.
     """
     if len(sentences) <= 1:
         return []
 
     try:
-        # Extract vectors in sentence order
-        vectors = [embeddings_dict[sentence] for sentence in sentences]
+        vectors = np.array(
+            [embeddings_dict[sentence] for sentence in sentences],
+            dtype=np.float32,
+        )
 
-        # Process in batches for large documents to prevent OOM errors
-        batch_size = 5000  # Adjust based on memory constraints
-        if len(vectors) > batch_size:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            similarities = []
+        # Consecutive pairs
+        v1 = vectors[:-1]
+        v2 = vectors[1:]
 
-            for i in range(0, len(vectors) - 1, batch_size):
-                end_idx = min(i + batch_size, len(vectors) - 1)
-                batch_vectors1 = torch.tensor(
-                    vectors[i:end_idx], dtype=torch.float32, device=device
-                )
-                batch_vectors2 = torch.tensor(
-                    vectors[i + 1 : end_idx + 1], dtype=torch.float32, device=device
-                )
+        # Norms
+        norms1 = np.linalg.norm(v1, axis=1)
+        norms2 = np.linalg.norm(v2, axis=1)
 
-                # Calculate norms
-                norms1 = torch.linalg.norm(batch_vectors1, dim=1)
-                norms2 = torch.linalg.norm(batch_vectors2, dim=1)
+        # Cosine similarity → angular distance
+        dot_products = np.sum(v1 * v2, axis=1)
+        # Avoid division by zero
+        denom = norms1 * norms2
+        denom = np.where(denom == 0, 1.0, denom)
+        cosine_sim = dot_products / denom
+        angular_distance = 1 - cosine_sim
 
-                # Calculate dot products
-                dot_products = torch.sum(batch_vectors1 * batch_vectors2, dim=1)
-
-                # Calculate similarities
-                batch_similarities = 1 - (dot_products / (norms1 * norms2))
-                similarities.extend(
-                    [round(float(sim), 5) for sim in batch_similarities.cpu()]
-                )
-
-                # Clean up batch memory
-                del (
-                    batch_vectors1,
-                    batch_vectors2,
-                    norms1,
-                    norms2,
-                    dot_products,
-                    batch_similarities,
-                )
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            return similarities
-        else:
-            # For smaller documents, process all at once
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            vectors_tensor = torch.tensor(vectors, dtype=torch.float32, device=device)
-
-            # Get consecutive pairs
-            vectors1 = vectors_tensor[:-1]
-            vectors2 = vectors_tensor[1:]
-
-            # Calculate norms
-            norms = torch.linalg.norm(vectors_tensor, dim=1)
-            norms1 = norms[:-1]
-            norms2 = norms[1:]
-
-            # Calculate dot products
-            dot_products = torch.sum(vectors1 * vectors2, dim=1)
-
-            # Calculate similarities (using 1 - cosine similarity for angular distance)
-            cosine_similarities = dot_products / (norms1 * norms2)
-            angular_similarities = 1 - cosine_similarities
-
-            # Move to CPU and round
-            result = [round(float(sim), 5) for sim in angular_similarities.cpu()]
-
-            # Cleanup GPU memory
-            if torch.cuda.is_available():
-                del vectors_tensor, vectors1, vectors2, norms, norms1, norms2
-                del dot_products, cosine_similarities, angular_similarities
-                torch.cuda.empty_cache()
-
-            return result
+        return [round(float(d), 5) for d in angular_distance]
 
     except Exception as e:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         logger.error(f"Error calculating similarities: {str(e)}")
         raise HTTPException(status_code=500, detail="Error calculating similarities")
 
@@ -1225,15 +1390,27 @@ async def health_check():
     Returns:
         dict: A dictionary containing:
             - status: Current health status of the service
-            - gpu_available: Boolean indicating if GPU is available
+            - embedding_backend: Which embedding backend is active
             - version: Current API version
     """
-    return {
+    result = {
         "status": "healthy",
-        "gpu_available": torch.cuda.is_available(),
+        "embedding_backend": EMBEDDING_BACKEND,
         "version": app.version,
-        "default_model": EMBEDDER_MODEL,
     }
+
+    if EMBEDDING_BACKEND == "vllm":
+        try:
+            model_name = _detect_vllm_model()
+            result["embedding_model"] = model_name
+            result["embedding_endpoint"] = "connected"
+        except Exception:
+            result["embedding_endpoint"] = "unreachable"
+    else:
+        result["gpu_available"] = _HAS_TORCH and torch.cuda.is_available()
+        result["default_model"] = EMBEDDER_MODEL
+
+    return result
 
 
 @app.post("/normalized_semantic_chunker/", response_model=ChunkingResult)
@@ -1512,7 +1689,7 @@ async def Normalized_Semantic_Chunker(
         )
 
         # Schedule cleanup after response is sent
-        if background_tasks:
+        if background_tasks and EMBEDDING_BACKEND == "local" and _HAS_TORCH:
             background_tasks.add_task(
                 lambda: torch.cuda.empty_cache() if torch.cuda.is_available() else None
             )
@@ -1530,7 +1707,7 @@ async def Normalized_Semantic_Chunker(
         logger.error(f"Error processing request: {error_type} - {error_msg}")
 
         # Clean GPU memory in case of error too
-        if torch.cuda.is_available():
+        if _HAS_TORCH and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         # Return a safe error message without exposing system details

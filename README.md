@@ -12,6 +12,29 @@
 
 Forked from https://github.com/smart-models/Normalized-Semantic-Chunker as I'm interested in the approach in a stand-alone kind of way in terms of the functionality that I might tweak but where I want to use my local vllm endpoints for llm/embeddings/reranker etc. as part of a pipeline.  It will mean throwing away the resource management somewhat or adapting it.
 
+## ⚠️ AI-Generated Content Notice
+
+This project was **modified with AI assistance** and should be treated accordingly:
+
+- **Not production-ready**: Created for a specific homelab environment.
+- **May contain bugs**: AI-generated code can have subtle issues.
+- **Author's Python experience**: The author (modifier) is not an experienced Python programmer.
+
+### AI Tools Used
+
+- GitHub Copilot (Claude models)
+- Local vLLM instances for analysis and consolidation
+
+### Licensing Note
+
+Released under the **GNU GENERAL PUBLIC LICENSE Version 3**. Given the AI-generated/modified nature:
+- The modifying author makes no claims about originality
+- Use at your own risk
+- If you discover any copyright concerns, please open an issue
+
+---
+
+
 ## Original README: 
 
 The Normalized Semantic Chunker is a cutting-edge tool that unlocks the full potential of semantic chunking in an expanded range of NLP applications processing text documents and splits them into semantically coherent segments while ensuring optimal chunk size for downstream NLP tasks.
