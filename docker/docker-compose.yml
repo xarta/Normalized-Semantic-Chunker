@@ -11,7 +11,6 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
-      - normalized_semantic_chunker_models:/app/models
       - normalized_semantic_chunker_logs:/app/logs
     environment:
       - TOKENIZERS_PARALLELISM=false
@@ -33,12 +32,6 @@ services:
       - deep-rag
 
 volumes:
-  normalized_semantic_chunker_models:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ../models
   normalized_semantic_chunker_logs:
     driver: local
     driver_opts:

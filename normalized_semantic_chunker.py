@@ -43,9 +43,7 @@ STEP_SIZE_LARGE_DOC = 5  # Step size for large documents
 STEP_SIZE_VERY_LARGE_DOC = 3  # Step size for very large documents
 
 ALLOWED_EXTENSIONS = {"txt", "md", "json"}
-EMBEDDER_MODEL = os.environ.get(
-    "EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
-)
+EMBEDDER_MODEL = os.environ.get("EMBEDDER_MODEL", "auto")
 MAX_FILE_SIZE = int(
     os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024)
 )  # 10MB di default
@@ -265,9 +263,9 @@ def get_embeddings_vllm(
             detail="EMBEDDING_BASE_URL not configured",
         )
 
-    # Resolve model name
+    # Resolve model name — "auto" or empty triggers detection from vLLM
     model_name = model
-    if not model_name or model_name == EMBEDDER_MODEL:
+    if not model_name or model_name == "auto":
         model_name = EMBEDDING_MODEL_NAME or _detect_vllm_model()
 
     url = f"{EMBEDDING_BASE_URL}/embeddings"
@@ -1154,8 +1152,8 @@ class ChunkingInput(BaseModel):
     max_tokens: int = Field(..., gt=0, description="Maximum number of tokens per chunk")
     model: str = Field(
         default=EMBEDDER_MODEL,
-        description=f"Embedding model to use. Default is {EMBEDDER_MODEL}",
-        json_schema_extra={"example": EMBEDDER_MODEL},
+        description="Embedding model to use. Default 'auto' detects from vLLM server.",
+        json_schema_extra={"example": "auto"},
     )
     merge_small_chunks: bool = Field(
         default=True,
