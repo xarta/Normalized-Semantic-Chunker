@@ -1,13 +1,15 @@
 name: normalized-semantic-chunker
 
 services:
-  # 1. Define a common base service (no profile, no ports)
-  base-service:
+  chunker:
     build:
       context: ..
       dockerfile: docker/dockerfile
     image: normalized-semantic-chunker:latest 
+    container_name: normalized-semantic-chunker
     restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
     volumes:
       - normalized_semantic_chunker_models:/app/models
       - normalized_semantic_chunker_logs:/app/logs
@@ -15,21 +17,13 @@ services:
       - TOKENIZERS_PARALLELISM=false
       - LOG_LEVEL=INFO
 
-      # Cache and Threading Optimizations
-      - MODEL_CACHE_TIMEOUT=${MODEL_CACHE_TIMEOUT:-3600}
+      # Threading Optimizations
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
       
-      # GPU Memory Optimizations
-      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-      - CUDA_LAUNCH_BLOCKING=0
-      - CUDA_CACHE_DISABLE=0
-      
       # Performance Tuning
       - PYTHONUNBUFFERED=1
-      - TORCH_CUDNN_V8_API_ENABLED=1
     healthcheck:
-      # Healthcheck needs to target port 8000 inside the container
       test: [ "CMD", "curl", "-f", "http://localhost:8000/", "||", "exit", "1" ]
       interval: 30s
       timeout: 10s
@@ -37,33 +31,6 @@ services:
       start_period: 20s
     networks:
       - deep-rag
-
-  # 2. Define the CPU service extending the base
-  cpu:
-    extends:
-      service: base-service
-    container_name: normalized-semantic-chunker-cpu 
-    profiles:
-      - cpu
-    ports:
-      - "${APP_PORT:-8000}:8000" 
-
-  # 3. Define the GPU service extending the base
-  gpu:
-    extends:
-      service: base-service
-    container_name: normalized-semantic-chunker-gpu
-    profiles:
-      - gpu
-    ports:
-      - "${APP_PORT:-8000}:8000" 
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ compute, utility ]
 
 volumes:
   normalized_semantic_chunker_models:

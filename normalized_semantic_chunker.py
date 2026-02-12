@@ -10,19 +10,11 @@ import numpy as np
 import httpx
 from logging.handlers import RotatingFileHandler
 from typing import List, Optional, Dict, Union
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from pydantic import BaseModel, Field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from contextlib import asynccontextmanager
-
-# Conditional imports — only needed for local embedding backend
-try:
-    import torch
-    from sentence_transformers import SentenceTransformer
-    _HAS_TORCH = True
-except ImportError:
-    _HAS_TORCH = False
 
 
 RESERVED_SYSTEM_MEMORY_GB = 4.0  # GB of RAM to keep free for the OS and other processes
@@ -62,9 +54,7 @@ MAX_WORKERS = int(
 )
 CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 ora in secondi
 
-# Embedding backend selection: "local" (sentence-transformers) or "vllm" (remote API)
-EMBEDDING_BACKEND = os.environ.get("EMBEDDING_BACKEND", "local")
-# Remote embedding endpoint configuration (used when EMBEDDING_BACKEND="vllm")
+# Remote embedding endpoint configuration
 EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "")
 EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "")  # auto-detect if empty
@@ -75,49 +65,23 @@ EMBEDDING_RETRY_BASE_DELAY = float(os.environ.get("EMBEDDING_RETRY_BASE_DELAY", 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if EMBEDDING_BACKEND == "vllm":
-        logger.info("Using remote embedding backend (vLLM)")
-        try:
-            model_name = _detect_vllm_model()
-            logger.info(f"Remote embedding model detected: {model_name}")
-        except Exception as e:
-            logger.error(f"Failed to connect to remote embedding endpoint: {str(e)}")
-    else:
-        if not _HAS_TORCH:
-            logger.error("Local backend selected but torch/sentence-transformers not installed")
-        else:
-            logger.info(
-                f"Loading embedding model {EMBEDDER_MODEL} during application startup..."
-            )
-            try:
-                _get_model(EMBEDDER_MODEL)
-                logger.info("Embedding model loaded successfully.")
-            except Exception as e:
-                logger.error(f"Failed to load embedding model: {str(e)}")
+    logger.info("Using remote embedding backend (vLLM)")
+    try:
+        model_name = _detect_vllm_model()
+        logger.info(f"Remote embedding model detected: {model_name}")
+    except Exception as e:
+        logger.error(f"Failed to connect to remote embedding endpoint: {str(e)}")
 
     yield
 
     # Cleanup
     logger.info("Application shutting down, cleaning up resources...")
-    if EMBEDDING_BACKEND == "local" and _HAS_TORCH:
-        try:
-            with _model_lock:
-                for model_name in list(_model_cache.keys()):
-                    if model_name in _model_cache:
-                        del _model_cache[model_name]
-                        logger.info(f"Removed model {model_name} from cache")
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.info("GPU memory cleared during shutdown")
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
 
 
 app = FastAPI(
     title="Normalized Semantic Chunker",
     description="API for processing and chunking text documents into smaller, semantically coherent segments",
-    version="0.7.2",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
@@ -170,11 +134,6 @@ def log_message(message, is_step=False, is_summary=False, verbosity=True):
     if is_step or is_summary or verbosity:
         logger.info(message)
 
-
-# Create a singleton for model caching with expiration
-_model_cache = {}
-_model_last_used = {}
-_model_lock = multiprocessing.RLock()  # Thread-safe lock for model cache
 
 # Cache for detected vLLM model name
 _detected_vllm_model: Optional[str] = None
@@ -337,69 +296,6 @@ def get_embeddings_vllm(
     return embeddings_dict
 
 
-def _get_model(model_name: str) -> "SentenceTransformer":
-    """Get model from cache or load it into RAM with cache expiration.
-
-    Args:
-        model_name (str): Name or path of the model to use.
-
-    Returns:
-        SentenceTransformer: The loaded model instance.
-    """
-    current_time = time.time()
-
-    with _model_lock:
-        # Check for expired models first
-        expired_models = [
-            name
-            for name, last_used in _model_last_used.items()
-            if current_time - last_used > CACHE_TIMEOUT
-        ]
-
-        # Remove expired models
-        for name in expired_models:
-            if (
-                name in _model_cache and name != model_name
-            ):  # Don't remove the one we're about to use
-                logger.info(f"Removing expired model {name} from cache")
-                del _model_cache[name]
-                del _model_last_used[name]
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        # Update or load the requested model
-        if model_name not in _model_cache:
-            # Create models directory if it doesn't exist
-            models_dir = Path("models")
-            models_dir.mkdir(exist_ok=True)
-
-            # Local path for the model
-            local_model_path = models_dir / model_name.replace("/", "_")
-
-            try:
-                if local_model_path.exists():
-                    # Load from local storage
-                    logger.info(f"Loading model from local storage: {local_model_path}")
-                    _model_cache[model_name] = SentenceTransformer(
-                        str(local_model_path)
-                    )
-                else:
-                    # Download and save model
-                    logger.info(
-                        f"Downloading model {model_name} and saving to {local_model_path}"
-                    )
-                    _model_cache[model_name] = SentenceTransformer(model_name)
-                    _model_cache[model_name].save(str(local_model_path))
-            except Exception as e:
-                logger.error(f"Error loading model {model_name}: {str(e)}")
-                raise
-
-        # Update last used timestamp
-        _model_last_used[model_name] = current_time
-
-        return _model_cache[model_name]
-
-
 def split_into_sentences(doc: str) -> List[str]:
     """Split a document into sentences using regex pattern matching.
 
@@ -454,111 +350,21 @@ def split_into_sentences(doc: str) -> List[str]:
     return [s for s in sentences if s]
 
 
-def get_embeddings_local(
-    doc: List[str],
-    model: str = EMBEDDER_MODEL,
-    batch_size: int = 8,
-    verbosity: bool = False,
-    convert_to_numpy: bool = True,
-    normalize_embeddings: bool = True,
-) -> dict:
-    """Generate embeddings using local sentence-transformers model.
-
-    Args:
-        doc: List of text strings to generate embeddings for.
-        model: Name or path of the model to use.
-        batch_size: Batch size for embedding generation.
-        verbosity: If True, shows all log messages and progress bars.
-        convert_to_numpy: Whether to convert output to numpy array.
-        normalize_embeddings: Whether to normalize embeddings.
-
-    Returns:
-        dict: Dictionary mapping input strings to their embeddings.
-
-    Raises:
-        HTTPException: If there's an error during the embedding process.
-    """
-    if not _HAS_TORCH:
-        raise HTTPException(
-            status_code=500,
-            detail="Local embedding backend requires torch and sentence-transformers",
-        )
-
-    try:
-        model_instance = _get_model(model)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        if len(doc) > 1000:
-            batch_size = max(1, batch_size // 2)
-            if verbosity:
-                logger.info(
-                    f"Large document detected, reducing batch size to {batch_size}"
-                )
-
-        if torch.cuda.is_available():
-            model_instance = model_instance.to(device)
-
-        embeddings = model_instance.encode(
-            doc,
-            batch_size=batch_size,
-            show_progress_bar=verbosity,
-            convert_to_numpy=convert_to_numpy,
-            normalize_embeddings=normalize_embeddings,
-        )
-
-        result = {
-            sentence: embedding.tolist() for sentence, embedding in zip(doc, embeddings)
-        }
-
-        if torch.cuda.is_available():
-            model_instance.cpu()
-            del embeddings
-            torch.cuda.empty_cache()
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Error generating embeddings: {str(e)}")
-        if _HAS_TORCH and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        raise HTTPException(
-            status_code=500,
-            detail=f"An unexpected error occurred: {str(e)}",
-        )
-
-
 def get_embeddings(
     doc: List[str],
     model: str = EMBEDDER_MODEL,
-    batch_size: int = 8,
-    verbosity: bool = False,
-    convert_to_numpy: bool = True,
-    normalize_embeddings: bool = True,
     **kwargs,
 ) -> dict:
-    """Generate embeddings using the configured backend.
-
-    Routes to either the remote vLLM API or local sentence-transformers
-    based on the EMBEDDING_BACKEND environment variable.
+    """Generate embeddings using the remote vLLM API.
 
     Args:
         doc: List of text strings to generate embeddings for.
-        model: Name or path of the model to use.
-        batch_size: Batch size (only used for local backend).
-        verbosity: If True, shows log messages.
-        convert_to_numpy: Whether to convert output to numpy (local only).
-        normalize_embeddings: Whether to normalize embeddings (local only).
+        model: Model name override.
 
     Returns:
         dict: Dictionary mapping input strings to their embeddings.
     """
-    if EMBEDDING_BACKEND == "vllm":
-        return get_embeddings_vllm(doc, model=model)
-    else:
-        return get_embeddings_local(
-            doc, model, batch_size, verbosity,
-            convert_to_numpy, normalize_embeddings,
-        )
+    return get_embeddings_vllm(doc, model=model)
 
 
 def calculate_similarity(
@@ -1395,20 +1201,16 @@ async def health_check():
     """
     result = {
         "status": "healthy",
-        "embedding_backend": EMBEDDING_BACKEND,
+        "embedding_backend": "vllm",
         "version": app.version,
     }
 
-    if EMBEDDING_BACKEND == "vllm":
-        try:
-            model_name = _detect_vllm_model()
-            result["embedding_model"] = model_name
-            result["embedding_endpoint"] = "connected"
-        except Exception:
-            result["embedding_endpoint"] = "unreachable"
-    else:
-        result["gpu_available"] = _HAS_TORCH and torch.cuda.is_available()
-        result["default_model"] = EMBEDDER_MODEL
+    try:
+        model_name = _detect_vllm_model()
+        result["embedding_model"] = model_name
+        result["embedding_endpoint"] = "connected"
+    except Exception:
+        result["embedding_endpoint"] = "unreachable"
 
     return result
 
@@ -1417,7 +1219,6 @@ async def health_check():
 async def Normalized_Semantic_Chunker(
     file: UploadFile = File(...),
     input_data: ChunkingInput = Depends(),
-    background_tasks: BackgroundTasks = None,
 ):
     """
     Process and chunk a text document into smaller, semantically coherent segments using advanced NLP techniques.
@@ -1435,7 +1236,7 @@ async def Normalized_Semantic_Chunker(
             - JSON files (.json): Expected format: {"chunks": [{"text": "..."}, ...]}
         input_data (ChunkingInput): Configuration parameters for the chunking process:
             - max_tokens (int): Maximum number of tokens allowed per chunk. Must be > 0.
-            - model (str, optional): Name or path of the embedding model to use. Defaults to 'sentence-transformers/all-MiniLM-L6-v2'.
+            - model (str, optional): Name of the embedding model. Defaults to auto-detected model from the vLLM server.
             - merge_small_chunks (bool, optional): If True, merges undersized chunks with semantically similar neighbors. Defaults to True.
             - show_progress_bar (bool, optional): If True, displays progress bars during long-running operations. Defaults to False.
 
@@ -1688,12 +1489,6 @@ async def Normalized_Semantic_Chunker(
             ),
         )
 
-        # Schedule cleanup after response is sent
-        if background_tasks and EMBEDDING_BACKEND == "local" and _HAS_TORCH:
-            background_tasks.add_task(
-                lambda: torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            )
-
         end_time = time.time()
         logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
         return result
@@ -1705,10 +1500,6 @@ async def Normalized_Semantic_Chunker(
         error_type = type(e).__name__
         error_msg = str(e)
         logger.error(f"Error processing request: {error_type} - {error_msg}")
-
-        # Clean GPU memory in case of error too
-        if _HAS_TORCH and torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         # Return a safe error message without exposing system details
         raise HTTPException(

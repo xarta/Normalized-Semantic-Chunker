@@ -16,7 +16,7 @@ To use this service, you need to send it a request containing:
 
 *   **A Text File:** You must upload a file containing the text you want to chunk. The code specifically allows files ending in `.txt`, `.md` (Markdown), or `.json` (JSON).
 *   **Maximum Tokens:** You need to tell the code the maximum number of tokens (words/word pieces) allowed in each chunk. This is a required number and must be greater than zero.
-*   **(Optional) Model Name:** The code uses a specific AI model (called an "embedding model") to understand the meaning of sentences. By default, it uses one called `"sentence-transformers/all-MiniLM-L6-v2"`, but you can optionally specify a different compatible model name if needed.
+*   **(Optional) Model Name:** The code uses a remote vLLM embedding endpoint to understand the meaning of sentences. By default, it auto-detects the model loaded on the vLLM server (e.g. `Qwen/Qwen3-VL-Embedding-2B`), but you can optionally specify a different model name if multiple models are available.
 *   **(Optional) Merge Small Chunks:** You can specify whether to merge undersized chunks with semantically similar neighbors (default: `true`).
 *   **(Optional) Verbosity:** You can specify whether to show detailed logs during processing (default: `false`).
 
@@ -56,14 +56,14 @@ When the code successfully processes your file, it sends back a result containin
     *   `source`: The name of the file that was uploaded.
     *   `processing_time`: How long the whole process took in seconds.
 
-The code also includes a simple "health check" address (`/`) that just confirms the service is running and whether it can use a GPU (a powerful type of processor).
+The code also includes a simple "health check" address (`/`) that confirms the service is running and whether it can reach the remote vLLM embedding endpoint.
 
 **4. How it Achieves its Purpose (Logic and Algorithms)**
 
 The code follows a multi-step process to create these smart chunks:
 
 *   **Step 1: Sentence Splitting:** It first reads the text from your file and uses a clever pattern-matching technique (`split_into_sentences` function with Regular Expressions) to break the entire document down into individual sentences. It tries to be smart about handling things like abbreviations (Mr., Dr.), decimals, and quotes so it doesn't split sentences incorrectly.
-*   **Step 2: Understanding Meaning (Embeddings):** For each sentence, it uses the specified AI model (`SentenceTransformer`) to generate a list of numbers called an "embedding" or "vector" (`get_embeddings` function). This vector represents the *meaning* of the sentence in a way the computer can understand. Sentences with similar meanings will have similar vectors. This step uses a GPU if available to speed it up. The models are downloaded and saved locally if not already present (`_get_model` function).
+*   **Step 2: Understanding Meaning (Embeddings):** For each sentence, it calls a remote vLLM embedding endpoint via an OpenAI-compatible HTTP API (`get_embeddings_vllm` function) to generate a list of numbers called an "embedding" or "vector". This vector represents the *meaning* of the sentence in a way the computer can understand. Sentences with similar meanings will have similar vectors. The heavy GPU work is done by the remote vLLM server, so the chunker container itself is lightweight and doesn't need a GPU.
 *   **Step 3: Measuring Similarity:** It then compares the meaning vectors of sentences that appear next to each other in the original text (`calculate_similarity` function). It calculates a "similarity score" (actually, a distance score - higher means *less* similar) between each adjacent pair of sentences. A high score suggests the topic might be changing between those two sentences.
 *   **Step 4: Initial Semantic Chunking:** This is the core chunking step (`parallel_find_optimal_chunks` function). It looks at all the similarity scores calculated in the previous step. The idea is to group consecutive sentences together into chunks, *unless* the similarity score between two sentences is very high (meaning they are dissimilar).
     *   It tries to find the best "cutoff point" (a "percentile" of the similarity scores) to decide where to split. A higher percentile means it only splits chunks where there's a *very* strong change in meaning between sentences.
@@ -77,12 +77,12 @@ The code follows a multi-step process to create these smart chunks:
 **5. Important Logic Flows or Data Transformations**
 
 *   **Text to Sentences:** The raw text string is transformed into a list of sentence strings.
-*   **Sentences to Embeddings:** Each sentence string is transformed into a numerical vector representing its meaning.
+*   **Sentences to Embeddings:** Each sentence string is sent to the remote vLLM endpoint and transformed into a numerical vector representing its meaning.
 *   **Embeddings to Similarity Scores:** Pairs of adjacent sentence vectors are transformed into a single number indicating their semantic distance.
 *   **Sentences + Scores to Chunks:** The list of sentences and the list of similarity scores are combined, using the percentile logic and token limits, to form an initial list of text chunks (each with text and token count).
 *   **Chunk Refinement:** The initial list of chunks undergoes two transformations: merging based on size and similarity, and splitting based on size limits.
-*   **Model Caching:** The AI models needed for embeddings can be large. The code uses a cache (`_model_cache` and `_get_model`) to keep a loaded model in memory (RAM) so it doesn't have to be reloaded from disk or re-downloaded every time. It also saves downloaded models locally in a `models` directory.
+*   **Remote Embedding Service:** Embeddings are fetched from a remote vLLM server via HTTP API calls. The chunker container itself has no ML frameworks or GPU dependencies — it's a lightweight Python service.
 *   **Parallel Processing:** The search for the optimal percentile cutoff (`parallel_find_optimal_chunks`) is computationally intensive. The code uses parallel processing to speed this up by distributing the work across multiple CPU cores.
 *   **Error Handling & Logging:** The code includes `try...except` blocks to catch errors during processing and uses a `logging` system to record information about its steps and any errors encountered (saving errors to a file in a `logs` directory). This helps in debugging if something goes wrong.
 
-In summary, this code defines a sophisticated API that takes text, understands its meaning sentence by sentence, and then groups related sentences into chunks that respect a user-defined size limit, performing adjustments to handle chunks that are too small or too large.
+In summary, this code defines a sophisticated API that takes text, sends sentences to a remote embedding service to understand their meaning, and then groups related sentences into chunks that respect a user-defined size limit, performing adjustments to handle chunks that are too small or too large.

@@ -1,3 +1,15 @@
+"""
+Integration tests for the Normalized Semantic Chunker API.
+
+Requires a running vLLM embedding endpoint (configured via EMBEDDING_BASE_URL
+and EMBEDDING_API_KEY environment variables). The app no longer bundles a local
+embedding model — all embeddings are fetched from the remote vLLM service.
+
+Typical test invocation:
+    EMBEDDING_BASE_URL=http://192.168.1.1:8000/v1 \
+    EMBEDDING_API_KEY=<key> \
+    pytest test/ -v
+"""
 import pytest
 import sys
 import os
