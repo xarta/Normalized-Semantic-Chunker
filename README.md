@@ -35,7 +35,7 @@ Released under the **GNU GENERAL PUBLIC LICENSE Version 3**. Given the AI-genera
 ---
 
 
-## Original README: 
+## Modified README continuation: 
 
 The Normalized Semantic Chunker is a cutting-edge tool that unlocks the full potential of semantic chunking in an expanded range of NLP applications processing text documents and splits them into semantically coherent segments while ensuring optimal chunk size for downstream NLP tasks.
 This innovative solution builds upon concepts from [YouTube's Advanced Text Splitting for RAG](https://www.youtube.com/watch?v=8OJC21T2SL4&t=1930s) and implementation patterns from [LangChain's semantic chunker documentation](https://python.langchain.com/docs/how_to/semantic-chunker/).
