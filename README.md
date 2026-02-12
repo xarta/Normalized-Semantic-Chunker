@@ -8,6 +8,12 @@
 
 # Normalized Semantic Chunker
 
+## Forked 
+
+Forked from https://github.com/smart-models/Normalized-Semantic-Chunker as I'm interested in the approach in a stand-alone kind of way in terms of the functionality that I might tweak but where I want to use my local vllm endpoints for llm/embeddings/reranker etc. as part of a pipeline.  It will mean throwing away the resource management somewhat or adapting it.
+
+## Original README: 
+
 The Normalized Semantic Chunker is a cutting-edge tool that unlocks the full potential of semantic chunking in an expanded range of NLP applications processing text documents and splits them into semantically coherent segments while ensuring optimal chunk size for downstream NLP tasks.
 This innovative solution builds upon concepts from [YouTube's Advanced Text Splitting for RAG](https://www.youtube.com/watch?v=8OJC21T2SL4&t=1930s) and implementation patterns from [LangChain's semantic chunker documentation](https://python.langchain.com/docs/how_to/semantic-chunker/).
 Conventional semantic chunkers prioritize content coherence but often produce chunks with highly variable token counts. This leads to issues like context window overflow and inconsistent retrieval quality, significantly impacting token-sensitive applications such as retrieval-augmented generation (RAG).
