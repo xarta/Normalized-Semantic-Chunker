@@ -407,4 +407,22 @@ If you're interested in contributing:
 
 Happy Semantic Chunking!
 
+## Ecosystem
+
+This service is part of the [xarta](https://github.com/xarta) document analysis ecosystem — a set of Dockerised microservices built for a nested Proxmox homelab running local AI inference on an RTX 5090 and RTX 4000 Blackwell.
+
+The project grew out of a practical need: AI-generated infrastructure code (Proxmox, LXC, Docker configs) is full of secrets and environment-specific details that make it unsafe to share and hard to reuse. These services clean, chunk, embed, and ingest that code into a vector database so AI agents can query it efficiently — and so sanitised versions can be published to GitHub.
+
+All services delegate compute-heavy work (LLM chat, embeddings, reranking) to shared vLLM endpoints via OpenAI-compatible APIs, taking advantage of batched and parallel GPU operations rather than bundling models locally.
+
+This is a work in progress, decomposing the original project that became too monolithic and difficult to develop into more manageable components.  The original project had many incomplete features that were proving difficult to implement with generative AI without impacting other features and so even when all components are migrated there will still be some development to do before the features originally envisaged are complete.
+
+| Repository | Description |
+|---|---|
+| [Normalized-Semantic-Chunker](https://github.com/xarta/Normalized-Semantic-Chunker) | Embedding-based semantic text chunking with statistical token-size control. Lightweight fork — delegates embeddings to a remote vLLM endpoint. |
+| [Agentic-Chunker](https://github.com/xarta/Agentic-Chunker) | LLM-driven proposition chunking — uses chat completions to semantically group content. Fork replacing Google Gemini with local vLLM. |
+| [gitleaks-validator](https://github.com/xarta/gitleaks-validator) | Dockerised gitleaks wrapper — pattern-driven secret scanning and replacement via REST API. |
+| [knowledge-service](https://github.com/xarta/knowledge-service) | Document ingestion into SeekDB (vector database) with RAG query interface. Composes chunking + embedding services. |
+| [content-analyser](https://github.com/xarta/content-analyser) | Duplication detection and contradiction analysis across document sets. Composes chunking, embedding, and LLM services. |
+
 ---
